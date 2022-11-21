@@ -1,13 +1,3 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[1]:
-
-
-# Imports here
-# get_ipython().run_line_magic('matplotlib', 'inline')
-# get_ipython().run_line_magic('config', "InlineBackend.figure_format = 'retina'")
-
 import matplotlib.pyplot as plt
 
 import torch
@@ -20,9 +10,19 @@ from PIL import Image
 from torchvision import datasets, transforms, models
 
 
-# In[2]:
-
-
+# if true set to GPU, if false set to CPU
+def set_device(use_gpu):
+    #Global Variable for device
+    global device
+    if use_gpu and torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif not use_gpu:
+        device = torch.device("cpu")
+    else:
+        print("GPU is not available, using CPU!")
+        device = torch.device("cpu")
+    print("Device set to ", device)
+        
 # Method to create classifier for model
 def create_classifier(model_out_features,hidden_units):
     from collections import OrderedDict
@@ -30,25 +30,19 @@ def create_classifier(model_out_features,hidden_units):
                               ('fc1', nn.Linear(model_out_features, hidden_units)),
                               ('relu', nn.ReLU()),
                               ('dropout', nn.Dropout(0.2)),
-                              ('fc2', nn.Linear(hidden_units, hidden_units)),
-                              ('relu2', nn.ReLU()),
-                              ('dropout2', nn.Dropout(0.2)),
-                              ('fc3', nn.Linear(hidden_units, hidden_units)),
-                              ('relu3', nn.ReLU()),
-                              ('dropout3', nn.Dropout(0.2)),
-                              ('fc4', nn.Linear(hidden_units, 102)),
+                              ('fc2', nn.Linear(hidden_units, 102)),
                               ('output', nn.LogSoftmax(dim=1))
                               ]))
     return classifier
 
 
-# In[3]:
 
 
 # Save the checkpoint of classifier
-def save_model(model,optimizer, model_architecture, learn_rate, directory, epoch, loss):
+def save_model(model, hidden_units ,optimizer, model_architecture, learn_rate, directory, epoch, loss):
     checkpoint = {'class_to_idx': model.class_to_idx,
                   'epoch': epoch,
+                  'hidden_units' : hidden_units,
                   'model_state_dict': model.classifier.state_dict(),
                   'optimizer_state_dict': optimizer.state_dict(),
                   'loss': loss,
@@ -65,21 +59,25 @@ def save_model(model,optimizer, model_architecture, learn_rate, directory, epoch
 def load_model(filepath):
     checkpoint = torch.load(filepath)
     # Download base model
-    model
+    model = None
     if checkpoint['model_architecture'] == "densenet_121":
         model = models.densenet121(pretrained=True)
+        # Fix base model parameters
+        for param in model.parameters():
+            param.requires_grad = False
+        model.classifier = create_classifier(1024,checkpoint['hidden_units'])
     elif checkpoint['model_architecture'] == "vgg13":
         model = models.vgg13(pretrained=True)
+        # Fix base model parameters
+        for param in model.parameters():
+            param.requires_grad = False
+        model.classifier = create_classifier(model.classifier[0].in_features,checkpoint['hidden_units'])
     else:
         print("Model architecture " + checkpoint['model_architecture'] + " NOT supported!")
         return
-    # Fix base model parameters
-    for param in model.parameters():
-        param.requires_grad = False
-    classifier = create_classifier()
+    
     # Load classifier weights
-    classifier.load_state_dict(checkpoint['model_state_dict'])
-    model.classifier = classifier
+    model.classifier.load_state_dict(checkpoint['model_state_dict'])
     # Only train the classifier parameters, feature parameters are frozen
     optimizer = optim.Adam(model.classifier.parameters(), checkpoint["learn_rate"])
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -89,18 +87,13 @@ def load_model(filepath):
     class_to_idx = checkpoint['class_to_idx']
     model.class_to_idx = class_to_idx
     # Move all tensors and model to device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
-    loss.to(device)
     return model,optimizer,epoch,loss
 
-
-# In[5]:
 
 
 # Process image to be input for model
 def process_image(image):
-    print("Image size :", image.size)
     
     # Resize image where shortest side is 256
     if ( image.size[0] > image.size[1]):
@@ -112,7 +105,6 @@ def process_image(image):
     else:
         resize  = 256, 256
         image.thumbnail(resize)
-    print("Image resized : " , image.size)
     
     # Crop out 224X224 center
     left = (image.size[0] - 224)/2
@@ -120,74 +112,53 @@ def process_image(image):
     right = (image.size[0] + 224)/2
     bottom = (image.size[1] + 224)/2
     image = image.crop((left,top,right,bottom))
-    print("Image cropped size ", image.size)
     
     # Convert int (0-255) to float (0-1)
     np_image = np.array(image)
-    print('Data Type: %s' % np_image.dtype)
-    print('Min: %.3f, Max: %.3f' % (np_image.min(), np_image.max()))
     np_image = np_image.astype('float32')
     np_image /= 255.0
-    print('Min: %.3f, Max: %.3f' % (np_image.min(), np_image.max()))
 
     # Normalize with means and std as follows
     mean = np.array([0.485, 0.456, 0.406]) 
     std = np.array([0.229, 0.224, 0.225])
     np_image = (np_image - mean)/std
-    print('Min: %.3f, Max: %.3f' % (np_image.min(), np_image.max()))
     np_image = np_image.transpose((2, 0, 1))
-    
     return np_image
 
 
-# In[ ]:
 
-
-## Train 
+## Train model with data and optimizer for provided epochs
 def train_model(model, data, epochs, optimizer):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    steps = 0
     running_loss = 0
-    print_every = 20
     criterion = nn.NLLLoss()
-
     for epoch in range(epochs):
         for inputs, labels in data:
-            steps += 1
             # Move input and label tensors to the default device
             inputs, labels = inputs.to(device), labels.to(device)
-
             optimizer.zero_grad()
 
             logps = model.forward(inputs)
-            #print("Log PS : " , logps)
             loss = criterion(logps, labels)
-            print("Loss : ", loss.item())
+            print("Training step loss : ", loss.item())
             loss.backward()
             optimizer.step()
             running_loss += loss.item()
 
-            if  steps % 20 == 0:
-                data_val = load_val_data()
-                model_eval(model,data_val, criterion)
-                running_loss = 0
-
-
-
-        print("Epoch ", epoch , " of ", epochs, ".")
+        print(f"Training loss for epoch : {running_loss/len(data):.3f}")
+        data_val = load_val_data()
+        model_eval(model,data_val, criterion)
+        print("Epoch ", epoch+1 , " of ", epochs, ".")
 
            
     print("Training Complete!")
     return model,optimizer,epoch, running_loss
 
 
-# In[ ]:
 
 def model_eval(model, data, criterion):
     test_loss = 0
     accuracy = 0
     model.eval()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     with torch.no_grad():
         for inputs, labels in data:
             inputs, labels = inputs.to(device), labels.to(device)
@@ -202,12 +173,12 @@ def model_eval(model, data, criterion):
             equals = top_class == labels.view(*top_class.shape)
             accuracy += torch.mean(equals.type(torch.FloatTensor)).item()
 
-    print(f"Test loss: {test_loss/len(data):.3f}.. "
-          f"Test accuracy: {accuracy/len(data):.3f}")
+    print(f"Validation loss: {test_loss/len(data):.3f}.. "
+          f"Validation accuracy: {accuracy/len(data):.3f}")
     model.train()
 
-## Load data
-def load_data(file_path):
+## Load training data:  include Random flip/rotation/crop in data transform
+def load_data(file_path, model):
     data_transform = transforms.Compose([transforms.RandomRotation(30),
                                        transforms.RandomResizedCrop(224),
                                        transforms.RandomHorizontalFlip(),
@@ -216,8 +187,11 @@ def load_data(file_path):
                                                             [0.229, 0.224, 0.225])])
     image_dataset = datasets.ImageFolder(file_path, transform=data_transform)
     data_loader = torch.utils.data.DataLoader(image_dataset, batch_size=32, shuffle=True)
+    model.class_to_idx= image_dataset.class_to_idx
+
     return data_loader
 
+# Load validation data
 def load_val_data():
     data_transform_test = transforms.Compose([transforms.Resize(255),
                                  transforms.CenterCrop(224),
@@ -227,40 +201,62 @@ def load_val_data():
     image_dataset = datasets.ImageFolder("flowers/valid/", transform=data_transform_test)
     data_loader = torch.utils.data.DataLoader(image_dataset, batch_size=32, shuffle=True)
     return data_loader
-# In[1]:
 
 
-## Create Model
-def create_model(arch,hidden_units,learn_rate,class_to_index_map):
+## Create Model given architecture, number of hidden units in hidden layer, learn rate, and label to index map
+def create_model(arch,hidden_units,learn_rate):
     model = None
     if arch == "densenet_121":
         model = models.densenet121(pretrained=True)
         for param in model.parameters():
             param.requires_grad = False
-        print("Model Classifier : ", model.classifier)
         model.classifier = create_classifier(1024,hidden_units)
     elif arch == "vgg13":
         model = models.vgg13(pretrained=True)
         for param in model.parameters():
             param.requires_grad = False
-        print("Model Classifier : ", model.classifier)
         model.classifier = create_classifier(model.classifier[0].in_features,hidden_units)
     else:
         print("Model architecture " + arch + " NOT supported!")
         return
     
-    print(model)
     
    
-    model.class_to_idx = class_to_index_map
     optimizer = optim.Adam(model.classifier.parameters(), learn_rate)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     return model,optimizer
 
+def predict(image_path, model, top):
+    # Turn model to eval mode
+    model.eval()
+    # Process image
+    image = Image.open(image_path)
+    np_image = process_image(image)
+    # Convert np array to tensor
+    image_tensor = torch.from_numpy(np_image).type(torch.FloatTensor)
+    inp = image_tensor.unsqueeze(0)
+    # move model and input to device
+    inp = inp.to(device)
+    model.to(device)
+    # feed forward
+    ps = torch.exp(model.forward(inp))
+    # Top probability and top class
+    top_p, top_class = ps.topk(top)
+    #Get index to class mapping
+    idx_to_class = {val: key for key, val in model.class_to_idx.items()}
+    top_probs, top_classes =top_p[0], top_class[0]
+    top_classes = [idx_to_class[int(cl_index)] for cl_index in top_classes]
+    return top_probs, top_classes
 
-# In[ ]:
-
-
+def log_prediction(top_p, top_class, category_names):
+    
+    class_name_to_index_map = None
+    with open(category_names, 'r') as f:
+        class_name_to_index_map = json.load(f)
+    print("Printing class names and calculated probabilities");
+    i = 0
+    for top_cl in top_class:
+        print(class_name_to_index_map[top_cl], " [", top_cl ,"] with probabilty of ", top_p[i].item()*100 ,"%" )
+        i +=1
 
 
